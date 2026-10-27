@@ -6,7 +6,8 @@ const CONFIG = {
   TAB: "Zadávání",       // jediný list, do kterého se píšou výsledky
   SWITCH_SECONDS: 15,    // po kolika sekundách se přepne další pohled
   REFRESH_SECONDS: 30,   // jak často se znovu stáhnou data z Google
-  DISCIPLINE_PAGE_SIZE: 10
+  DISCIPLINE_PAGE_SIZE: 10,
+  AUTO_SCROLL_DELAY_SECONDS: 1
 };
 
 const DISCIPLINES = [
@@ -24,6 +25,7 @@ let current = 0;
 let currentPage = 0;
 let switchTimer = null;
 let scrollFrame = null;
+let scrollStartTimer = null;
 
 /* CSV parser (uvozovky, čárky, nové řádky v buňkách) */
 function parseCSV(text) {
@@ -242,19 +244,24 @@ function render() {
 
 function startAutoScroll(duration) {
   cancelAnimationFrame(scrollFrame);
+  clearTimeout(scrollStartTimer);
   const view = document.querySelector("#view .table-scroll");
   if (!view) return;
   view.scrollTop = 0;
   const distance = view.scrollHeight - view.clientHeight;
   if (distance <= 0 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
-  const started = performance.now();
-  const step = (now) => {
-    const progress = Math.min((now - started) / duration, 1);
-    view.scrollTop = distance * progress;
-    if (progress < 1) scrollFrame = requestAnimationFrame(step);
-  };
-  scrollFrame = requestAnimationFrame(step);
+  const delay = CONFIG.AUTO_SCROLL_DELAY_SECONDS * 1000;
+  const scrollDuration = Math.max(duration - delay, 0);
+  scrollStartTimer = setTimeout(() => {
+    const started = performance.now();
+    const step = (now) => {
+      const progress = scrollDuration === 0 ? 1 : Math.min((now - started) / scrollDuration, 1);
+      view.scrollTop = distance * progress;
+      if (progress < 1) scrollFrame = requestAnimationFrame(step);
+    };
+    scrollFrame = requestAnimationFrame(step);
+  }, delay);
 }
 
 async function refreshAll() {

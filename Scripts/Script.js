@@ -5,7 +5,8 @@ const CONFIG = {
   SHEET_ID: "1sQmZIy-5heJWsP9A5GzJphVdTh_xjd_qKzZ2xPrbosA",
   TAB: "Zadávání",       // jediný list, do kterého se píšou výsledky
   SWITCH_SECONDS: 15,    // po kolika sekundách se přepne další pohled
-  REFRESH_SECONDS: 30    // jak často se znovu stáhnou data z Google
+  REFRESH_SECONDS: 30,   // jak často se znovu stáhnou data z Google
+  DISCIPLINE_PAGE_SIZE: 10
 };
 
 const DISCIPLINES = [
@@ -20,7 +21,9 @@ const DISCIPLINES = [
 const $ = (id) => document.getElementById(id);
 let people = null;      // načtení závodníci
 let current = 0;
+let currentPage = 0;
 let switchTimer = null;
+let scrollFrame = null;
 
 /* CSV parser (uvozovky, čárky, nové řádky v buňkách) */
 function parseCSV(text) {
@@ -167,7 +170,7 @@ const VIEWS = [
       rows: ranked(people.filter(p => p.total > 0), p => p.total)
         .map(({ rank, it }) => [rank + ".", it.name || "—", it.school, fmt(it.total)])
   }) },
-  ...DISCIPLINES.map(d => ({ name: d.name, build: () => ({
+  ...DISCIPLINES.map(d => ({ name: d.name, paginated: true, build: () => ({
       head: ["Pořadí", "Jméno a příjmení", "Škola", `Výkon (${d.unit})`, "Body"],
       rows: ranked(people.filter(p => p.d[d.key].v > 0), p => p.d[d.key].v)
         .map(({ rank, it }) => [rank + ".", it.name || "—", it.school, fmt(it.d[d.key].v), fmt(it.d[d.key].b)])
@@ -189,6 +192,18 @@ const VIEWS = [
 
 const esc = (s) => String(s).replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
 
+function renderColgroup(head, rows) {
+  const lengths = head.map((label, i) => Math.max(
+    String(label).length,
+    ...rows.map(row => String(row[i] || "").length)
+  ));
+  const weights = lengths.map(length => Math.min(Math.max(length, 4), 30));
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  return "<colgroup>" + weights.map(weight =>
+    `<col style="width:${(weight / total * 100).toFixed(2)}%">`
+  ).join("") + "</colgroup>";
+}
+
 function render() {
   const v = VIEWS[current];
   $("title").textContent = v.name;
@@ -199,15 +214,47 @@ function render() {
     view.innerHTML = '<div class="msg">Data nejsou k dispozici.<br>' + esc(lastError || "Načítám…") + '</div>';
     return;
   }
-  const { head, rows } = v.build();
+  const { head, rows: allRows } = v.build();
+  const pageCount = Math.max(1, Math.ceil(allRows.length / CONFIG.DISCIPLINE_PAGE_SIZE));
+  currentPage = Math.min(currentPage, pageCount - 1);
+  const rows = v.paginated
+    ? allRows.slice(
+        currentPage * CONFIG.DISCIPLINE_PAGE_SIZE,
+        (currentPage + 1) * CONFIG.DISCIPLINE_PAGE_SIZE
+      )
+    : allRows;
   if (!rows.length) {
     view.innerHTML = '<div class="msg">Zatím nejsou zadané žádné výsledky.</div>';
     return;
   }
+  const renderRows = (tableRows) =>
+    tableRows.map(r => "<tr>" + r.map(c => `<td>${esc(c)}</td>`).join("") + "</tr>").join("");
+  const staticRows = rows.slice(0, 5);
+  const scrollingRows = rows.slice(5);
+  const colgroup = renderColgroup(head, rows);
   view.innerHTML =
-    "<table><thead><tr>" + head.map(h => `<th>${esc(h)}</th>`).join("") + "</tr></thead><tbody>" +
-    rows.map(r => "<tr>" + r.map(c => `<td>${esc(c)}</td>`).join("") + "</tr>").join("") +
-    "</tbody></table>";
+    '<div class="table-static"><table>' + colgroup + "<thead><tr>" + head.map(h => `<th>${esc(h)}</th>`).join("") +
+    "</tr></thead><tbody>" + renderRows(staticRows) + "</tbody></table></div>" +
+    (scrollingRows.length
+      ? '<div class="table-scroll"><table>' + colgroup + "<tbody>" + renderRows(scrollingRows) + "</tbody></table></div>"
+      : "");
+}
+
+function startAutoScroll(duration) {
+  cancelAnimationFrame(scrollFrame);
+  const view = document.querySelector("#view .table-scroll");
+  if (!view) return;
+  view.scrollTop = 0;
+  const distance = view.scrollHeight - view.clientHeight;
+  if (distance <= 0 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+  const started = performance.now();
+  const step = (now) => {
+    const progress = Math.min((now - started) / duration, 1);
+    view.scrollTop = distance * progress;
+    if (progress < 1) scrollFrame = requestAnimationFrame(step);
+  };
+  scrollFrame = requestAnimationFrame(step);
 }
 
 async function refreshAll() {
@@ -233,10 +280,28 @@ function startProgress() {
 
 function show(i) {
   current = (i + VIEWS.length) % VIEWS.length;
+  currentPage = 0;
   render();
   startProgress();
   clearTimeout(switchTimer);
-  switchTimer = setTimeout(() => show(current + 1), CONFIG.SWITCH_SECONDS * 1000);
+  const view = VIEWS[current];
+  const rows = people ? view.build().rows : [];
+  const pageCount = view.paginated
+    ? Math.max(1, Math.ceil(rows.length / CONFIG.DISCIPLINE_PAGE_SIZE))
+    : 1;
+  const pageSeconds = CONFIG.SWITCH_SECONDS / pageCount;
+  startAutoScroll(pageSeconds * 1000);
+  const advance = () => {
+    if (view.paginated && currentPage + 1 < pageCount) {
+      currentPage++;
+      render();
+      startAutoScroll(pageSeconds * 1000);
+      switchTimer = setTimeout(advance, pageSeconds * 1000);
+    } else {
+      show(current + 1);
+    }
+  };
+  switchTimer = setTimeout(advance, pageSeconds * 1000);
 }
 
 function init() {

@@ -1,225 +1,396 @@
-/* ============================================================
-   NASTAVENÍ
-   ============================================================ */
+/* =========================
+   Configuration
+   ========================= */
 const CONFIG = {
   SHEET_ID: "1sQmZIy-5heJWsP9A5GzJphVdTh_xjd_qKzZ2xPrbosA",
-  TAB: "Zadávání",       // jediný list, do kterého se píšou výsledky
-  SWITCH_SECONDS: 15,    // po kolika sekundách se přepne další pohled
-  REFRESH_SECONDS: 30,   // jak často se znovu stáhnou data z Google
+  TAB: "Zadávání",
+  SWITCH_SECONDS: 15,
+  REFRESH_SECONDS: 30,
   DISCIPLINE_PAGE_SIZE: 10,
-  AUTO_SCROLL_DELAY_SECONDS: 1
+  AUTO_SCROLL_DELAY_SECONDS: 1,
+  AUTO_SCROLL_END_DELAY_SECONDS: 1
 };
 
 const DISCIPLINES = [
   { name: "Bench press", key: "bench press", unit: "opak." },
-  { name: "Mrtvý tah",   key: "mrtvý tah",   unit: "opak." },
-  { name: "Dřep",        key: "dřep",        unit: "opak." },
-  { name: "Shyby",       key: "shyby",       unit: "opak." },
-  { name: "Trojskok",    key: "trojskok",    unit: "cm" }
+  { name: "Mrtvý tah", key: "mrtvý tah", unit: "opak." },
+  { name: "Dřep", key: "dřep", unit: "opak." },
+  { name: "Shyby", key: "shyby", unit: "opak." },
+  { name: "Trojskok", key: "trojskok", unit: "cm" }
 ];
-/* ============================================================ */
 
-const $ = (id) => document.getElementById(id);
-let people = null;      // načtení závodníci
+/* =========================
+   Application state
+   ========================= */
+const getElement = (id) => document.getElementById(id);
+
+// These values are updated as data loads and as the automatic presentation advances.
+let people = null;
+let lastError = "";
 let current = 0;
 let currentPage = 0;
 let switchTimer = null;
 let scrollFrame = null;
 let scrollStartTimer = null;
 
-/* CSV parser (uvozovky, čárky, nové řádky v buňkách) */
+/* =========================
+   Data parsing and loading
+   ========================= */
 function parseCSV(text) {
+  // A small CSV parser is used instead of split(",") because cells may contain
+  // commas, quoted text, or line breaks.
   const rows = [];
-  let row = [], cell = "", inQ = false;
+  let row = [];
+  let cell = "";
+  let inQuotes = false;
+
   for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQ) {
-      if (c === '"' && text[i + 1] === '"') { 
-        cell += '"'; 
-        i++; 
-      }
-      else if (c === '"') {
-        inQ = false;
-      }
-      else {
-        cell += c;
-        }
-    } 
-    else if (c === '"') {
-        inQ = true;
-        }
-    else if (c === ",") { 
-        row.push(cell); 
-        cell = ""; 
-        }
-    else if (c === "\n" || c === "\r") {
-      if (c === "\r" && text[i + 1] === "\n") {
+    const character = text[i];
+
+    if (inQuotes) {
+      if (character === '"' && text[i + 1] === '"') {
+        cell += '"';
         i++;
-        }
-      row.push(cell); 
-      cell = ""; 
-      rows.push(row); 
+      } else if (character === '"') {
+        inQuotes = false;
+      } else {
+        cell += character;
+      }
+    } else if (character === '"') {
+      inQuotes = true;
+    } else if (character === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (character === "\n" || character === "\r") {
+      if (character === "\r" && text[i + 1] === "\n") {
+        i++;
+      }
+      row.push(cell);
+      cell = "";
+      rows.push(row);
       row = [];
-    } 
-    else {
-        cell += c;
-        }
+    } else {
+        cell += character;
+    }
   }
-  if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+
+  if (cell !== "" || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+
   return rows;
 }
 
-const num = (v) => {
-  const n = parseFloat(String(v || "").replace(/\s/g, "").replace(",", "."));
-  return isNaN(n) ? 0 : n;
-};
-const fmt = (n) => (Math.round(n * 10) / 10).toString().replace(".", ",");
+function parseNumber(value) {
+  const number = parseFloat(
+    String(value || "").replace(/\s/g, "").replace(",", ".")
+  );
+  return isNaN(number) ? 0 : number;
+}
 
-let lastError = "";
-const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+function formatNumber(number) {
+  return (Math.round(number * 10) / 10).toString().replace(".", ",");
+}
 
-async function fetchRows(extra) {
-  const url = `https://docs.google.com/spreadsheets/d/${CONFIG.SHEET_ID}/gviz/tq?tqx=out:csv&headers=0${extra}&_=${Date.now()}`;
+function normalize(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+async function fetchRows(queryParameters) {
+  const url =
+    `https://docs.google.com/spreadsheets/d/${CONFIG.SHEET_ID}` +
+    `/gviz/tq?tqx=out:csv&headers=0${queryParameters}&_=${Date.now()}`;
+
   console.log(url);
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error("HTTP " + res.status);
-  const text = await res.text();
-  if (text.trim().startsWith("<")) throw new Error("Google chce přihlášení – tabulka není sdílená přes odkaz");
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error("HTTP " + response.status);
+
+  const text = await response.text();
+  if (text.trim().startsWith("<")) {
+    throw new Error(
+        "Google chce přihlášení – tabulka není sdílená přes odkaz"
+    );
+  }
+
   return parseCSV(text);
 }
 
-/* Když v načtených datech chybí záhlaví, použije se pevné rozložení sloupců listu Zadávání:
-   A č. | B jméno | C škola | D váha | E váha 75 % | F,G bench | H,I mrtvý tah | J,K dřep | L,M shyby | N,O trojskok | P body celkem */
-const FIXED = { name: 1, school: 2, total: 15,
-  d: { "bench press": [5, 6], "mrtvý tah": [7, 8], "dřep": [9, 10], "shyby": [11, 12], "trojskok": [13, 14] } };
+const FIXED_COLUMNS = {
+  name: 1,
+  school: 2,
+  total: 15,
+  disciplines: {
+    "bench press": [5, 6],
+    "mrtvý tah": [7, 8],
+    "dřep": [9, 10],
+    "shyby": [11, 12],
+    "trojskok": [13, 14]
+  }
+};
 
 function parseFixed(rows) {
+  // Fallback for sheets whose header row cannot be detected. These indexes
+  // match the fixed layout of the "Zadávání" sheet.
   const data = rows.filter(r => /^\d+$/.test((r[0] || "").trim()));
   if (!data.length) return null;
+
   return data.map(r => {
-    const p = { name: (r[FIXED.name] || "").trim(), school: (r[FIXED.school] || "").trim(),
-                total: num(r[FIXED.total]), d: {} };
+    const person = {
+      name: (r[FIXED_COLUMNS.name] || "").trim(),
+      school: (r[FIXED_COLUMNS.school] || "").trim(),
+      total: parseNumber(r[FIXED_COLUMNS.total]),
+      disciplines: {}
+    };
+
     DISCIPLINES.forEach(d => {
-      const [v, b] = FIXED.d[d.key];
-      p.d[d.key] = { v: num(r[v]), b: num(r[b]) };
+      const [performanceColumn, pointsColumn] =
+        FIXED_COLUMNS.disciplines[d.key];
+      person.disciplines[d.key] = {
+        performance: parseNumber(r[performanceColumn]),
+        points: parseNumber(r[pointsColumn])
+      };
     });
-    return p;
-  }).filter(p => p.name || p.total > 0);
+
+    return person;
+  }).filter(person => person.name || person.total > 0);
 }
 
 function parsePeople(rows) {
-  const hi = rows.findIndex(r => r.some(c => norm(c).includes("body celkem")));
-  if (hi < 0) return parseFixed(rows);
-  const head = rows[hi].map(norm);
-  const find = (test) => head.findIndex(test);
-  const iName = find(h => h.includes("jméno"));
-  const iSchool = find(h => h === "škola" || h.includes("škola"));
-  const iTotal = find(h => h.includes("body celkem"));
-  const idx = {};
+  // Prefer column names so the display keeps working if the sheet is reordered.
+  const headerIndex = rows.findIndex(row =>
+    row.some(cell => normalize(cell).includes("body celkem"))
+  );
+  if (headerIndex < 0) return parseFixed(rows);
+
+  const headers = rows[headerIndex].map(normalize);
+  const findColumn = (test) => headers.findIndex(test);
+  const nameColumn = findColumn(header => header.includes("jméno"));
+  const schoolColumn = findColumn(
+    header => header === "škola" || header.includes("škola")
+  );
+  const totalColumn = findColumn(header => header.includes("body celkem"));
+  const disciplineColumns = {};
+
   DISCIPLINES.forEach(d => {
-    idx[d.key] = {
-      v: find(h => h.includes(d.key) && h.includes("výkon")),
-      b: find(h => h.includes(d.key) && h.includes("body"))
+    disciplineColumns[d.key] = {
+      performance: findColumn(
+        header => header.includes(d.key) && header.includes("výkon")
+      ),
+      points: findColumn(
+        header => header.includes(d.key) && header.includes("body")
+      )
     };
   });
-  const at = (r, i) => (i >= 0 ? (r[i] || "").trim() : "");
-  return rows.slice(hi + 1).map(r => {
-    const p = { name: at(r, iName), school: at(r, iSchool), total: num(at(r, iTotal)), d: {} };
-    DISCIPLINES.forEach(d => {
-      p.d[d.key] = { v: num(at(r, idx[d.key].v)), b: num(at(r, idx[d.key].b)) };
-    });
-    return p;
-  }).filter(p => p.name || p.total > 0);
+
+  const getCell = (row, column) =>
+    column >= 0 ? (row[column] || "").trim() : "";
+
+  return rows
+    .slice(headerIndex + 1)
+    .map(row => {
+      const person = {
+        name: getCell(row, nameColumn),
+        school: getCell(row, schoolColumn),
+        total: parseNumber(getCell(row, totalColumn)),
+        disciplines: {}
+      };
+
+      DISCIPLINES.forEach(discipline => {
+        const columns = disciplineColumns[discipline.key];
+        person.disciplines[discipline.key] = {
+          performance: parseNumber(getCell(row, columns.performance)),
+          points: parseNumber(getCell(row, columns.points))
+        };
+      });
+
+      return person;
+    })
+    .filter(person => person.name || person.total > 0);
 }
 
 async function load() {
-  // 1) podle názvu listu, 2) první list v tabulce, 3) list s gid=0
-  const attempts = [
+  const queryAttempts = [
     `&sheet=${encodeURIComponent(CONFIG.TAB)}`,
     ``,
     `&gid=0`
   ];
-  let lastRows = null, err = "";
-  for (const extra of attempts) {
+
+  let lastRows = null;
+  let errorMessage = "";
+
+  for (const queryParameters of queryAttempts) {
     try {
-      const rows = await fetchRows(extra);
+      const rows = await fetchRows(queryParameters);
       lastRows = rows;
-      const res = parsePeople(rows);
-      if (res) { people = res; return; }
-    } catch (e) { err = e.message; }
+      const parsedPeople = parsePeople(rows);
+      if (parsedPeople) {
+        people = parsedPeople;
+        return;
+      }
+    } catch (error) {
+      errorMessage = error.message;
+    }
   }
+
   if (lastRows) {
-    const peek = lastRows.slice(0, 4).map(r => r.slice(0, 8).join(" | ")).join("  //  ");
-    throw new Error('Záhlaví "Body celkem" nenalezeno. Načtený list začíná: ' + peek.slice(0, 300));
+    const preview = lastRows
+      .slice(0, 4)
+      .map(row => row.slice(0, 8).join(" | "))
+      .join("  //  ");
+    throw new Error(
+      'Záhlaví "Body celkem" nenalezeno. Načtený list začíná: ' +
+      preview.slice(0, 300)
+    );
   }
-  throw new Error(err || "Data se nepodařilo načíst");
+
+  throw new Error(errorMessage || "Data se nepodařilo načíst");
 }
 
-/* pořadí se stejným počtem bodů = stejné místo */
-function ranked(list, valueOf) {
-  list.sort((x, y) => valueOf(y) - valueOf(x));
-  let rank = 0, last = null;
-  return list.map((it, i) => {
-    const v = valueOf(it);
-    if (v !== last) { rank = i + 1; last = v; }
-    return { rank, it };
+function rankRows(items, getValue) {
+  // Sorting mutates the supplied array, but each caller passes a new filtered
+  // array, so the loaded source data remains unchanged.
+  items.sort((a, b) => getValue(b) - getValue(a));
+
+  let rank = 0;
+  let previousValue = null;
+  return items.map((item, index) => {
+    const value = getValue(item);
+    if (value !== previousValue) {
+      rank = index + 1;
+      previousValue = value;
+    }
+    return { rank, item };
   });
 }
 
 const VIEWS = [
-  { name: "Celkové pořadí", build: () => ({
+  {
+    name: "Celkové pořadí",
+    build: () => ({
       head: ["Pořadí", "Jméno a příjmení", "Škola", "Body celkem"],
-      rows: ranked(people.filter(p => p.total > 0), p => p.total)
-        .map(({ rank, it }) => [rank + ".", it.name || "—", it.school, fmt(it.total)])
-  }) },
-  ...DISCIPLINES.map(d => ({ name: d.name, paginated: true, build: () => ({
-      head: ["Pořadí", "Jméno a příjmení", "Škola", `Výkon (${d.unit})`, "Body"],
-      rows: ranked(people.filter(p => p.d[d.key].v > 0), p => p.d[d.key].v)
-        .map(({ rank, it }) => [rank + ".", it.name || "—", it.school, fmt(it.d[d.key].v), fmt(it.d[d.key].b)])
-  }) })),
-  { name: "Družstva", build: () => {
+      rows: rankRows(
+        people.filter(person => person.total > 0),
+        person => person.total
+      ).map(({ rank, item }) => [
+        rank + ".",
+        item.name || "—",
+        item.school,
+        formatNumber(item.total)
+      ])
+    })
+  },
+  ...DISCIPLINES.map(discipline => ({
+    name: discipline.name,
+    paginated: true,
+    build: () => ({
+      head: [
+        "Pořadí",
+        "Jméno a příjmení",
+        "Škola",
+        `Výkon (${discipline.unit})`,
+        "Body"
+      ],
+      rows: rankRows(
+        people.filter(
+          person => person.disciplines[discipline.key].performance > 0
+        ),
+        person => person.disciplines[discipline.key].performance
+      ).map(({ rank, item }) => {
+        const result = item.disciplines[discipline.key];
+        return [
+          rank + ".",
+          item.name || "—",
+          item.school,
+          formatNumber(result.performance),
+          formatNumber(result.points)
+        ];
+      })
+    })
+  })),
+  {
+    name: "Družstva",
+    build: () => {
       const teams = {};
-      people.filter(p => p.school).forEach(p => {
-        (teams[p.school] = teams[p.school] || { school: p.school, total: 0, n: 0 });
-        teams[p.school].total += p.total;
-        teams[p.school].n += 1;
+      people.filter(person => person.school).forEach(person => {
+        const team = teams[person.school] || {
+          school: person.school,
+          total: 0,
+          count: 0
+        };
+        team.total += person.total;
+        team.count += 1;
+        teams[person.school] = team;
       });
-      const list = Object.values(teams).filter(t => t.total > 0);
+
+      const teamList = Object.values(teams).filter(team => team.total > 0);
       return {
         head: ["Pořadí", "Škola", "Body družstva"],
-        rows: ranked(list, t => t.total).map(({ rank, it }) => [rank + ".", it.school, fmt(it.total)])
+        rows: rankRows(teamList, team => team.total).map(({ rank, item }) => [
+          rank + ".",
+          item.school,
+          formatNumber(item.total)
+        ])
       };
-  } }
+    }
+  }
 ];
 
-const esc = (s) => String(s).replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+const escapeHtml = (value) =>
+  String(value).replace(
+    /[&<>"]/g,
+    character => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;"
+    }[character])
+  );
 
 function renderColgroup(head, rows) {
-  const lengths = head.map((label, i) => Math.max(
-    String(label).length,
-    ...rows.map(row => String(row[i] || "").length)
-  ));
+  // Both table sections receive the same <colgroup>; widths are based on the
+  // longest header or cell value so their columns line up.
+  const lengths = head.map((label, columnIndex) =>
+    Math.max(
+      String(label).length,
+      ...rows.map(row => String(row[columnIndex] || "").length)
+    )
+  );
   const weights = lengths.map(length => Math.min(Math.max(length, 4), 30));
   const total = weights.reduce((sum, weight) => sum + weight, 0);
-  return "<colgroup>" + weights.map(weight =>
-    `<col style="width:${(weight / total * 100).toFixed(2)}%">`
-  ).join("") + "</colgroup>";
+  return (
+    "<colgroup>" +
+    weights
+      .map(weight => `<col style="width:${(weight / total * 100).toFixed(2)}%">`)
+      .join("") +
+    "</colgroup>"
+  );
 }
 
 function render() {
-  const v = VIEWS[current];
-  $("title").textContent = v.name;
+  const viewDefinition = VIEWS[current];
+  getElement("title").textContent = viewDefinition.name;
   document.querySelectorAll("#tabs button").forEach((b, i) =>
-    b.setAttribute("aria-current", i === current ? "true" : "false"));
-  const view = $("view");
+    b.setAttribute("aria-current", i === current ? "true" : "false")
+  );
+
+  const view = getElement("view");
   if (!people) {
-    view.innerHTML = '<div class="msg">Data nejsou k dispozici.<br>' + esc(lastError || "Načítám…") + '</div>';
+    view.innerHTML =
+      '<div class="msg">Data nejsou k dispozici.<br>' +
+      escapeHtml(lastError || "Načítám…") +
+      "</div>";
     return;
   }
-  const { head, rows: allRows } = v.build();
-  const pageCount = Math.max(1, Math.ceil(allRows.length / CONFIG.DISCIPLINE_PAGE_SIZE));
+
+  const { head, rows: allRows } = viewDefinition.build();
+  const pageCount = Math.max(
+    1,
+    Math.ceil(allRows.length / CONFIG.DISCIPLINE_PAGE_SIZE)
+  );
   currentPage = Math.min(currentPage, pageCount - 1);
-  const rows = v.paginated
+
+  const rows = viewDefinition.paginated
     ? allRows.slice(
         currentPage * CONFIG.DISCIPLINE_PAGE_SIZE,
         (currentPage + 1) * CONFIG.DISCIPLINE_PAGE_SIZE
@@ -229,20 +400,44 @@ function render() {
     view.innerHTML = '<div class="msg">Zatím nejsou zadané žádné výsledky.</div>';
     return;
   }
+
   const renderRows = (tableRows) =>
-    tableRows.map(r => "<tr>" + r.map(c => `<td>${esc(c)}</td>`).join("") + "</tr>").join("");
+    tableRows
+      .map(row =>
+        "<tr>" +
+        row.map(cell => `<td>${escapeHtml(cell)}</td>`).join("") +
+        "</tr>"
+      )
+      .join("");
+
   const staticRows = rows.slice(0, 5);
   const scrollingRows = rows.slice(5);
   const colgroup = renderColgroup(head, rows);
-  view.innerHTML =
-    '<div class="table-static"><table>' + colgroup + "<thead><tr>" + head.map(h => `<th>${esc(h)}</th>`).join("") +
-    "</tr></thead><tbody>" + renderRows(staticRows) + "</tbody></table></div>" +
-    (scrollingRows.length
-      ? '<div class="table-scroll"><table>' + colgroup + "<tbody>" + renderRows(scrollingRows) + "</tbody></table></div>"
-      : "");
+  const headerCells = head
+    .map(header => `<th>${escapeHtml(header)}</th>`)
+    .join("");
+  const staticTable =
+    '<div class="table-static"><table>' +
+    colgroup +
+    "<thead><tr>" +
+    headerCells +
+    "</tr></thead><tbody>" +
+    renderRows(staticRows) +
+    "</tbody></table></div>";
+  const scrollingTable = scrollingRows.length
+    ? '<div class="table-scroll"><table>' +
+      colgroup +
+      "<tbody>" +
+      renderRows(scrollingRows) +
+      "</tbody></table></div>"
+    : "";
+
+  view.innerHTML = staticTable + scrollingTable;
 }
 
 function startAutoScroll(duration) {
+  // The first five rows are outside .table-scroll and therefore stay visible.
+  // Only the remaining rows are animated.
   cancelAnimationFrame(scrollFrame);
   clearTimeout(scrollStartTimer);
   const view = document.querySelector("#view .table-scroll");
@@ -252,11 +447,11 @@ function startAutoScroll(duration) {
   if (distance <= 0 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
   const delay = CONFIG.AUTO_SCROLL_DELAY_SECONDS * 1000;
-  const scrollDuration = Math.max(duration - delay, 0);
   scrollStartTimer = setTimeout(() => {
     const started = performance.now();
     const step = (now) => {
-      const progress = scrollDuration === 0 ? 1 : Math.min((now - started) / scrollDuration, 1);
+      const progress =
+        duration === 0 ? 1 : Math.min((now - started) / duration, 1);
       view.scrollTop = distance * progress;
       if (progress < 1) scrollFrame = requestAnimationFrame(step);
     };
@@ -267,17 +462,19 @@ function startAutoScroll(duration) {
 async function refreshAll() {
   try {
     await load();
-    $("status").textContent = "Aktualizováno " + new Date().toLocaleTimeString("cs-CZ");
-  } catch (e) {
-    lastError = e.message;
-    $("status").textContent = "Chyba: " + e.message;
-    console.error(e);
+    getElement("status").textContent =
+      "Aktualizováno " + new Date().toLocaleTimeString("cs-CZ");
+  } catch (error) {
+    lastError = error.message;
+    getElement("status").textContent = "Chyba: " + error.message;
+    console.error(error);
   }
+
   render();
 }
 
 function startProgress() {
-  const bar = $("bar");
+  const bar = getElement("bar");
   bar.style.transition = "none";
   bar.style.width = "0";
   void bar.offsetWidth;
@@ -286,23 +483,36 @@ function startProgress() {
 }
 
 function show(i) {
+  // A discipline may have several 10-row pages, but all pages share the
+  // discipline's normal display interval.
   current = (i + VIEWS.length) % VIEWS.length;
   currentPage = 0;
   render();
   startProgress();
   clearTimeout(switchTimer);
-  const view = VIEWS[current];
-  const rows = people ? view.build().rows : [];
-  const pageCount = view.paginated
-    ? Math.max(1, Math.ceil(rows.length / CONFIG.DISCIPLINE_PAGE_SIZE))
+  const viewDefinition = VIEWS[current];
+  const rows = people ? viewDefinition.build().rows : [];
+  const pageCount = viewDefinition.paginated
+    ? Math.max(
+        1,
+        Math.ceil(rows.length / CONFIG.DISCIPLINE_PAGE_SIZE)
+      )
     : 1;
   const pageSeconds = CONFIG.SWITCH_SECONDS / pageCount;
-  startAutoScroll(pageSeconds * 1000);
+  const endDelay = viewDefinition.paginated
+    ? CONFIG.AUTO_SCROLL_END_DELAY_SECONDS
+    : 0;
+  // Each page is divided into: top pause, scrolling, and bottom pause.
+  const scrollTime = Math.max(
+    pageSeconds - CONFIG.AUTO_SCROLL_DELAY_SECONDS - endDelay,
+    0
+  );
+  startAutoScroll(scrollTime * 1000);
   const advance = () => {
-    if (view.paginated && currentPage + 1 < pageCount) {
+    if (viewDefinition.paginated && currentPage + 1 < pageCount) {
       currentPage++;
       render();
-      startAutoScroll(pageSeconds * 1000);
+      startAutoScroll(scrollTime * 1000);
       switchTimer = setTimeout(advance, pageSeconds * 1000);
     } else {
       show(current + 1);
@@ -312,14 +522,16 @@ function show(i) {
 }
 
 function init() {
-  const nav = $("tabs");
-  VIEWS.forEach((v, i) => {
+  const navigation = getElement("tabs");
+  VIEWS.forEach((view, index) => {
     const b = document.createElement("button");
-    b.textContent = v.name;
-    b.onclick = () => show(i);
-    nav.appendChild(b);
+    b.textContent = view.name;
+    b.onclick = () => show(index);
+    navigation.appendChild(b);
   });
+
   refreshAll().then(() => show(0));
   setInterval(refreshAll, CONFIG.REFRESH_SECONDS * 1000);
 }
+
 init();

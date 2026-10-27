@@ -3,20 +3,6 @@
 This document explains how [`Scripts/Script.js`](./Scripts/Script.js) loads,
 transforms, renders, and cycles through the competition results.
 
-## 0. External libraries
-
-The page loads two browser libraries from jsDelivr before the application
-script:
-
-- **Papa Parse** parses Google Sheets CSV responses, including quoted cells,
-  commas, and line breaks.
-- **Lodash** provides common collection operations such as filtering, finding
-  columns, dropping rows, and descending ordering.
-
-The remaining functions are application-specific: they connect the sheet
-columns to the competition model, build views, render the split tables, and
-control the presentation timing.
-
 ## 1. Configuration
 
 The `CONFIG` object controls the data source and presentation timing:
@@ -34,19 +20,15 @@ data, and the unit shown in the performance column.
 
 ## 2. Loading data
 
-`load()` always requests the configured `TAB` sheet. It does not fall back to
-the spreadsheet's default sheet or to `gid=0`, because those fallbacks could
-load a different table and display unrelated results.
+`load()` tries three Google Sheets URLs in order:
 
-Each successful response is parsed as CSV by Papa Parse through the small
-`parseCSV()` adapter. Papa Parse handles quoted cells, escaped quotes, commas
-inside cells, and line breaks inside quoted cells.
+1. The configured sheet name.
+2. The spreadsheet's default/first sheet.
+3. The sheet with `gid=0`.
 
-If Google redirects the request to a login page or returns HTML instead of
-CSV, `fetchRows()` reports a concise access error for the configured sheet.
-This is a permissions issue, not something client-side JavaScript can bypass:
-the sheet must be shared for viewing or the application must use an
-authenticated data source.
+Each successful response is parsed as CSV by `parseCSV()`. The parser handles
+quoted cells, escaped quotes, commas inside cells, and line breaks inside
+quoted cells.
 
 If a response contains a recognizable header with `Body celkem`, the
 column-based parser is used. It finds columns by their normalized names, so
@@ -133,14 +115,18 @@ enabled `prefers-reduced-motion`.
 pages, the discipline's total `SWITCH_SECONDS` is divided equally between
 those pages.
 
-Each discipline page is timed as:
+Each discipline page is normally timed as:
 
 ```text
 top delay + scroll duration + bottom delay = page duration
 ```
 
-This means the page remains at the bottom for one second before changing, but
-the overall discipline rotation still follows the configured timing.
+The scroll duration is clamped to zero if the page interval is shorter than
+the two configured pauses. Therefore, a very large number of pages can leave
+less time for scrolling, but page changes still follow the calculated page
+interval and the overall discipline rotation still follows the configured
+timing. When there is enough time, the page remains at the bottom for the
+configured end delay before changing.
 
 When the final page finishes, `show()` advances to the next view. Manual tab
 selection also resets the selected view to its first page.
